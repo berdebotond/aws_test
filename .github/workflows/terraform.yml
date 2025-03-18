@@ -1,0 +1,100 @@
+name: "Terraform CI/CD"
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+    paths:
+      - 'infrastructure/terraform/**'
+      - '.github/workflows/terraform.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/terraform/**'
+      - '.github/workflows/terraform.yml'
+
+jobs:
+  terraform:
+    name: "Terraform"
+    runs-on: ubuntu-latest
+    
+    # Determine environment based on branch
+    env:
+      TF_WORKING_DIR: infrastructure/terraform/ec2-ollama
+    
+    # Allow for manual deployment control on main branch
+    concurrency:
+      group: terraform-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.5.7"
+      
+      - name: Set environment variables
+        id: env_setup
+        run: |
+          if [[ $GITHUB_REF == 'refs/heads/main' ]]; then
+            echo "TF_ENVIRONMENT=prod" >> $GITHUB_ENV
+          elif [[ $GITHUB_REF == refs/heads/feature/* ]]; then
+            echo "TF_ENVIRONMENT=dev" >> $GITHUB_ENV
+          else
+            echo "TF_ENVIRONMENT=staging" >> $GITHUB_ENV
+          fi
+          
+          # Create a temporary SSH key for Terraform
+          ssh-keygen -t rsa -b 2048 -f /tmp/temp_key -N ""
+          echo "SSH_PUBLIC_KEY_PATH=/tmp/temp_key.pub" >> $GITHUB_ENV
+      
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      - name: Terraform Init
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform init
+
+      - name: Terraform Format
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform fmt -check
+
+      - name: Terraform Validate
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform validate -no-color
+
+      - name: Terraform Plan
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform plan \
+            -var="environment=${{ env.TF_ENVIRONMENT }}" \
+            -var="ssh_public_key_path=${{ env.SSH_PUBLIC_KEY_PATH }}" \
+            -no-color
+        id: plan
+
+      # Only apply on push to main or feature branches
+      - name: Terraform Apply
+        if: github.event_name == 'push'
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          terraform apply \
+            -var="environment=${{ env.TF_ENVIRONMENT }}" \
+            -var="ssh_public_key_path=${{ env.SSH_PUBLIC_KEY_PATH }}" \
+            -auto-approve
+        
+      - name: Output Information
+        if: github.event_name == 'push'
+        run: |
+          cd ${{ env.TF_WORKING_DIR }}
+          echo "Ollama API Endpoint: $(terraform output -raw ollama_api_endpoint)" 
